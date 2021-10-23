@@ -85,7 +85,7 @@ void loop() {
       goto exit;
     };
     const mbedtls_x509_crt* peer = client->getPeerCertificate();
-
+    mbedtls_sha256_ret(peer->raw.p, peer->raw.len, sha256_server, 0);
     server_cert_as_pem = der2pem("CERTIFICATE", peer->raw.p, peer->raw.len);
 
     // Traverse up to (any) root & serialize the CAcert. We need it in
@@ -116,15 +116,12 @@ void loop() {
     if (httpCode != 401)
       goto exit;
 
-    // Extract peer cert and calculate hash over the public key; as, especially
-    // with Let's Encrypt - the cert itself is regularly renewed.
-    //
     peer = client->getPeerCertificate();
-    mbedtls_sha256_ret(peer->raw.p, peer->raw.len, sha256_server, 0);
-
-    Serial.print("Fingerprint server cert: ");
-    for (int i = 0; i < 32; i++) Serial.printf("%02x", sha256_server[i]);
-    Serial.println("");
+    mbedtls_sha256_ret(peer->raw.p, peer->raw.len, sha256, 0);
+    if (memcmp(sha256, sha256_server, 32)) {
+      Serial.println("Server changed mid registration. Aborting");
+      goto exit;
+    }
 
     nonce = strdup((https.getString().c_str()));
     Serial.println("Got a NONCE");
@@ -166,11 +163,21 @@ void loop() {
     };
 
     httpCode =  https.GET();
+
+    peer = client->getPeerCertificate();
+    mbedtls_sha256_ret(peer->raw.p, peer->raw.len, tmp, 0);
+    if (memcmp(tmp, sha256_server, 32)) {
+      Serial.println("Server changed mid registration. Aborting");
+      goto exit;
+    }
+
+
     if (httpCode != 200) {
       Serial.println("Failed to register");
       delete client;
       return;
     }
+
     Serial.println("Registration was accepted");
 
     mbedtls_sha256_init(&sha_ctx);
@@ -182,12 +189,23 @@ void loop() {
     mbedtls_sha256_free(&sha_ctx);
 
     if (!https.getString().equalsIgnoreCase((char*)tmp)) {
-      Serial.println("Registered OK - but confirmation did not compute");
-      delete client;
-      return;
+      Serial.println("Registered OK - but confirmation did not compute. Aborted.");
+      goto exit;
     }
 
-    Serial.println("We are fully paired - we've proven to each other we know the secret & there is no MITM.");
+    // Extract peer cert and calculate hash over the public key; as, especially
+    // with Let's Encrypt - the cert itself is regularly renewed.
+    //
+    if (fingerprint_from_certpubkey(peer, sha256_server_key)) {
+      Serial.println("Extraction of public key of server failed. Aborted.");
+      goto exit;
+    };
+    
+    sha256toHEX(sha256_server_key, (char*)tmp);
+    Serial.print("Server public key SHA256: ");
+    Serial.println((char*)tmp);
+
+    Serial.println("\nWe are fully paired - we've proven to each other we know the secret & there is no MITM.");
 
     // store/keep the server KEY sha256 & our own key/cert.
     // note: server currently tracks our full cert (not just the key as it should).
