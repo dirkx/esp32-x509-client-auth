@@ -71,11 +71,12 @@ void loop() {
   if (now < 3600)
     return;
 
+  if (!(client = new WiFiClientSecure())) {
+    Serial.println("WiFiClientSecure for CA fetch failed.");
+    return;
+  }
+
   if (ca_root == NULL) {
-    if (!(client = new WiFiClientSecure())) {
-      Serial.println("WiFiClientSecure for CA fetch failed.");
-      return;
-    }
     // Sadly required - due to a limitation in the current SSL stack we must
     // provide the root CA. but we do not know it (yet). So learn it first.
     //
@@ -98,15 +99,16 @@ void loop() {
     goto exit;
   };
 
-  if (nonce == NULL) {
-    if (!(client = new WiFiClientSecure())) {
-      Serial.println("WiFiClientSecure for register fetch failed.");
-      return;
-    }
-    client->setCACert(ca_root);
-    client->setCertificate(client_cert_as_pem);
-    client->setPrivateKey(client_key_as_pem);
+  if (!(client = new WiFiClientSecure())) {
+    Serial.println("WiFiClientSecure for register fetch failed.");
+    return;
+  };
 
+  client->setCACert(ca_root);
+  client->setCertificate(client_cert_as_pem);
+  client->setPrivateKey(client_key_as_pem);
+
+  if (nonce == NULL) {
     if (!https.begin(*client, URL REGISTER_PATH "?name=testV2" )) {
       Serial.println("Failed to begin https");
       goto exit;
@@ -128,16 +130,7 @@ void loop() {
     goto exit;
   };
 
-  if (nonce) {
-    if (!(client = new WiFiClientSecure())) {
-      Serial.println("WiFiClientSecure for register fetch failed.");
-      return;
-    }
-
-    client->setCACert(ca_root);
-    client->setCertificate(client_cert_as_pem);
-    client->setPrivateKey(client_key_as_pem);
-
+  if (nonce != (char*)1) {
     // Create the reply; SHA256(nonce, tag(secret), client, server);
     //
     mbedtls_sha256_context sha_ctx;
@@ -171,7 +164,6 @@ void loop() {
       goto exit;
     }
 
-
     if (httpCode != 200) {
       Serial.println("Failed to register");
       delete client;
@@ -200,16 +192,42 @@ void loop() {
       Serial.println("Extraction of public key of server failed. Aborted.");
       goto exit;
     };
-    
+
     sha256toHEX(sha256_server_key, (char*)tmp);
     Serial.print("Server public key SHA256: ");
     Serial.println((char*)tmp);
 
     Serial.println("\nWe are fully paired - we've proven to each other we know the secret & there is no MITM.");
+    nonce = (char *)1;
 
     // store/keep the server KEY sha256 & our own key/cert.
     // note: server currently tracks our full cert (not just the key as it should).
+    //
+    goto exit;
   };
+
+  Serial.println("Fetching pricelist");
+
+  // Fetch the pricelist.
+  if (!https.begin(*client, URL REGISTER_PATH )) {
+    Serial.println("Failed to begin https");
+    goto exit;
+  };
+
+  httpCode =  https.GET();
+  if (httpCode != 200) {
+    Serial.printf("SKUS fetch failed: %d\n", httpCode);
+    goto exit;
+  };
+  peer = client->getPeerCertificate();
+  mbedtls_sha256_ret(peer->raw.p, peer->raw.len, sha256, 0);
+  if (memcmp(sha256, sha256_server, 32)) {
+    Serial.println("Server changed. Aborting");
+    goto exit;
+  }
+
+  Serial.print("SKU response:");
+  Serial.println(https.getString());
 
   Serial.println("Wait forever");
   for (;;) {};
